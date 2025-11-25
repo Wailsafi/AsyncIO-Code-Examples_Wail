@@ -1,5 +1,14 @@
 import time
 from pathlib import Path
+import asyncio
+import aiofiles 
+
+import httpx 
+
+from concurrent.futures import ProcessPoolExecutor
+
+
+
 
 import requests
 from PIL import Image
@@ -24,32 +33,68 @@ ORIGINAL_DIR = Path("original_images")
 PROCESSED_DIR = Path("processed_images")
 
 
-def download_single_image(session: requests.Session, url: str, img_num: int) -> Path:
-    print(f"Downloading {url}...")
-    ts = int(time.time())
-    url = f"{url}?ts={ts}"  # Add timestamp to avoid caching issues
-    response = session.get(url, timeout=10, allow_redirects=True)
+# def download_single_image( url: str, img_num: int) -> Path:
+#     print(f"Downloading {url}...")
+#     ts = int(time.time())
+#     url = f"{url}?ts={ts}"  # Add timestamp to avoid caching issues
+#     response = requests.get(url, timeout=10, allow_redirects=True)
+#     response.raise_for_status()
+
+#     filename = f"image_{img_num}.jpg"
+#     download_path = ORIGINAL_DIR / filename
+
+#     with download_path.open("wb") as f:
+#         for chunk in response.iter_content(chunk_size=8192): ### this is an intelligent way to not allow the code to eun out of memory,
+#             #so the image is loaded in chencks when the 
+#             f.write(chunk)
+
+#     print(f"Downloaded and saved to: {download_path}")
+#     return download_path
+
+
+# async def download_images(urls: list) -> list[Path]:
+#         async with asyncio.TaskGroup() as tg:
+#             tasks=[
+#                 tg.create_task(asyncio.to_thread(download_single_image,url,img_num)) for img_num, url in enumerate(urls, start=1)
+#             ]
+#         img_paths=[task.result() for task in tasks]
+            
+    
+#         # img_paths = [
+#         #     download_single_image( url, img_num)
+#         #     for img_num, url in enumerate(urls, start=1)
+#         # ]
+        
+
+#         return img_paths
+
+async def download_single_image_httpx(client: httpx.AsyncClient, url: str, img_num: int) ->Path:
+    print(f"downloading{url}")
+    ts=int(time.time())
+    url=f"{url}?ts={ts}"
+    response=  await client.get(url, timeout=10, follow_redirects=True)
+
     response.raise_for_status()
 
-    filename = f"image_{img_num}.jpg"
-    download_path = ORIGINAL_DIR / filename
+    filename=f"image_{img_num}.jpg"
+    download_path=ORIGINAL_DIR/ filename 
+    async with aiofiles.open("download_path", "wb") as f :
+        async for chunk in response.aiter_bytes(8192):
+             await  f.write(chunk )
 
-    with download_path.open("wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
+    print(f"qownloaded and saved to:{download_path}")
+    return download_path 
 
-    print(f"Downloaded and saved to: {download_path}")
-    return download_path
-
-
-def download_images(urls: list) -> list[Path]:
-    with requests.Session() as session:
-        img_paths = [
-            download_single_image(session, url, img_num)
+async def download_images(urls: list ) -> list[Path]:
+    async with httpx.AsyncClient() as client:
+       async with asyncio.TaskGroup()as tg :
+        tasks =[
+            tg.create_task(download_single_image_httpx(client, url, img_num))
             for img_num, url in enumerate(urls, start=1)
         ]
+    img_paths =[task.result() for task in tasks]
+    return img_paths 
 
-    return img_paths
 
 
 def process_single_image(orig_path: Path) -> Path:
@@ -97,23 +142,34 @@ def process_single_image(orig_path: Path) -> Path:
     return save_path
 
 
-def process_images(orig_paths: list[Path]) -> list[Path]:
-    img_paths = [process_single_image(orig_path) for orig_path in orig_paths]
+# async def process_images(orig_paths: list[Path]) -> list[Path]:
+#      async with asyncio.TaskGroup() as tg:
+#          tasks=[
+#              tg.create_task(asyncio.to_thread(process_single_image,orig_path)) for orig_path in orig_paths
+#          ]
+#      img_paths=[task.result() for task in tasks]
+#      return img_paths
+async def process_images(orig_paths:list[Path])-> list[Path]:
+    loop= asyncio.get_running_loop()
+    with ProcessPoolExecutor() as executor:
+        tasks=[loop.run_in_executor(executor, process_single_image, orig_path)
+               for orig_path in orig_paths  ]
+        processed_paths =await asyncio.gather(*tasks, return_exceptions=True)
+    return processed_paths 
+ 
 
-    return img_paths
 
-
-def main():
+async def main():
     ORIGINAL_DIR.mkdir(parents=True, exist_ok=True)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
     start_time = time.perf_counter()
 
-    img_paths = download_images(IMAGE_URLS)
+    img_paths =await  download_images(IMAGE_URLS)
 
     proc_start_time = time.perf_counter()
 
-    processed_paths = process_images(img_paths)
+    processed_paths = await process_images(img_paths)
 
     finished_time = time.perf_counter()
 
@@ -133,4 +189,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
